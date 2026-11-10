@@ -6,6 +6,66 @@ which enables to use applications which supports kernel framebuffer device to re
 
 [日本語版](readme_ja.md)
 
+## PYNQ-Z2 with PYNQ v3.x (native build on the board)
+
+The driver has been ported to current kernels (PYNQ v3.1 ships a Petalinux 2024.1 / 6.6-series kernel).
+It is built natively on the board against the installed kernel headers, and it is attached to the
+hardware with a runtime device-tree overlay ([`pynqz2fb.dtso`](pynqz2fb.dtso)). You do not need to
+replace any file on the boot partition: on PYNQ v3.x the device tree is inside `image.ub`.
+
+Run all of the following on the board as root (`sudo -i`):
+
+1. Install build dependencies.
+
+    ```
+    apt-get install -y build-essential bc bison flex libssl-dev device-tree-compiler
+    ```
+
+2. Check that kernel headers for the running kernel exist and are prepared.
+
+    ```
+    ls /lib/modules/$(uname -r)/build
+    # If kbuild later complains about missing scripts/ binaries (fixdep, modpost), prepare them once:
+    make -C /lib/modules/$(uname -r)/build modules_prepare
+    ```
+
+    A "compiler differs from the one used to build the kernel" warning is expected and harmless.
+
+3. Build the module and the overlay. This produces `pynqz1fb.ko` and `pynqz2fb.dtbo`.
+
+    ```
+    make
+    ```
+
+    The display resolution is set in `pynqz2fb.dtso` (`width`/`height`, default 1280x720).
+    Supported modes are 640x480, 800x480, 800x600, 1280x720, 1280x1024 and 1920x1080.
+
+4. Load the base overlay bitstream. This also sets up the PL clocks.
+
+    ```
+    source /etc/profile.d/pynq_venv.sh
+    python3 -c "from pynq import Overlay; Overlay('base.bit')"
+    ```
+
+5. Apply the device-tree overlay and load the driver.
+
+    ```
+    mkdir /sys/kernel/config/device-tree/overlays/pynqfb
+    cat pynqz2fb.dtbo > /sys/kernel/config/device-tree/overlays/pynqfb/dtbo
+    cat /sys/kernel/config/device-tree/overlays/pynqfb/status   # should print "applied"
+    insmod ./pynqz1fb.ko
+    dmesg | tail -n 20
+    ```
+
+To unload, run `rmmod pynqz1fb` and then `rmdir /sys/kernel/config/device-tree/overlays/pynqfb`.
+Always unload the driver before downloading another bitstream; reprogramming the PL while the
+VDMA is running will hang the bus.
+
+The kernel must have fbdev support (`CONFIG_FB` plus the `cfb_*` / fb I/O helpers). If not,
+the build stops with an explicit `#error`. In that case check with `zcat /proc/config.gz | grep CONFIG_FB`.
+
+The instructions below are for the original PYNQ-Z1 image released in 2017.
+
 ## Requirements
 * A PYNQ-Z1 board or equivalent.
 * PYNQ-Z1 prebuilt image released at Feb 2017 or later.

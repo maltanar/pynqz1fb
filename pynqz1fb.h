@@ -134,3 +134,11 @@
 #define OFST_DISPLAY_DIV 0x14
 #define OFST_DISPLAY_LOCK_L 0x18
 #define OFST_DISPLAY_FLTR_LOCK_H 0x1C
+
+// PYNQ HLS pixel_unpack (PYNQ v2.x+ base overlay HDMI out path)
+#define PIXEL_UNPACK_REG_MODE   0x10
+#define PIXEL_UNPACK_MODE_24BPP 0
+
+// PYNQ HLS color_convert (PYNQ v2.x+ base overlay HDMI out path)
+#define COLOR_CONVERT_NUM_COEFFS 12
+#define COLOR_CONVERT_REG_COEFF(i) (0x10 + 8 * (i))

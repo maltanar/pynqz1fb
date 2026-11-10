@@ -1,30 +1,35 @@
-.PHONY: all clean
+# Out-of-tree build for the PYNQ framebuffer driver.
+#
+# Native build on the board (default):
+#     make            # builds pynqz1fb.ko and pynqz2fb.dtbo
+#
+# Cross build: point KDIR at a prepared kernel tree and set ARCH/CROSS_COMPILE, e.g.
+#     make KDIR=/path/to/linux ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf-
 
-SRC_DIR := $(shell pwd)
-BUILD_DIR := $(shell pwd)/kernel-build
+ifneq ($(KERNELRELEASE),)
+# Invoked by kbuild
+obj-m := pynqz1fb.o
 
-MODULES = pynqz1fb.o
+else
 
-obj-m := $(MODULES)
+KDIR ?= /lib/modules/$(shell uname -r)/build
+PWD  := $(shell pwd)
 
-ARCH = arm
-CROSS_COMPILE = arm-linux-gnueabihf-
+.PHONY: all module dtbo clean
 
-pynqz1fb.ko: pynqz1fb.c pynqz1fb.h
-	mkdir -p $(BUILD_DIR)
-	cp config.pynq $(BUILD_DIR)/.config
-	cp Module.symvers.pynq $(BUILD_DIR)/Module.symvers
-	cd $(BUILD_DIR)
-	$(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -C $(KERNEL_SRC_ROOT) O=$(BUILD_DIR) oldconfig
-	$(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -C $(KERNEL_SRC_ROOT) O=$(BUILD_DIR) prepare
-	$(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -C $(KERNEL_SRC_ROOT) O=$(BUILD_DIR) modules_prepare
-	$(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -C $(KERNEL_SRC_ROOT) O=$(BUILD_DIR) M=$(SRC_DIR) modules
+all: module dtbo
 
-all: pynqz1fb.ko
+module:
+	$(MAKE) -C $(KDIR) M=$(PWD) modules
+
+dtbo: pynqz2fb.dtbo
+
+pynqz2fb.dtbo: pynqz2fb.dtso
+	# Cell sizes of the target node (/) are unknown when compiling an overlay; silence those checks.
+	dtc -@ -W no-reg_format -W no-avoid_default_addr_size -I dts -O dtb -o $@ $<
 
 clean:
-	@$(RM) -rf $(BUILD_DIR)
-	@$(RM) *.o *.ko *.mod.c *.mod.o 
-	@$(RM) Module.symvers modules.order
-	@$(RM) .pynqz1fb.*.cmd
-	@$(RM) -rf .tmp_versions
+	$(MAKE) -C $(KDIR) M=$(PWD) clean
+	$(RM) pynqz2fb.dtbo
+
+endif

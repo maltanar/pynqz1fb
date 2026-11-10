@@ -32,6 +32,8 @@
 #include <linux/io.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
+#include <linux/platform_device.h>
+#include <linux/version.h>
 
 #include "pynqz1fb.h"
 
@@ -83,7 +85,7 @@ static struct fb_var_screeninfo pynqz1_fb_var = {
 };
 
 struct pynqz1_frame {
-    u32     phys;
+    dma_addr_t phys;
     void*   virt;
 };
 
@@ -114,7 +116,7 @@ struct pynqz1_fb_screen_param
 
     struct dynclk_param dynclk;
 };
-struct pynqz1_fb_screen_param pynqz1_fb_screen_params[] = {
+static struct pynqz1_fb_screen_param pynqz1_fb_screen_params[] = {
     /*w,    h,    hfsz, hss,  hse,  vfsz, vss,  vse,   pre, mul, post, rsvd */
     { 640,  480,  800,  656,  752,  525,  489,  491,  {1, 10, 8, 0} },
     { 800,  480,  1056, 840,  968,  525,  489,  491,  {1, 10, 6, 0} },
@@ -125,8 +127,10 @@ struct pynqz1_fb_screen_param pynqz1_fb_screen_params[] = {
     { 0 },
 };
 
-// Number of memory resources this driver requires.
+// Number of memory resources this driver requires (dynclk, VTC, VDMA).
 #define NUMBER_OF_MEM_RESOURCES 3
+// Optional memory resources present in PYNQ v2.x+ base overlays (color_convert, pixel_unpack).
+#define NUMBER_OF_OPT_MEM_RESOURCES 2
 
 struct pynqz1_fb_device {
     struct fb_info  info;       // fb_info struct to register framebuffer
@@ -134,6 +138,8 @@ struct pynqz1_fb_device {
     void __iomem*   reg_dynclk; // virtual address to which dynclk register space is mapped.
     void __iomem*   reg_vtc;    // virtual address to which VTC register space is mapped.
     void __iomem*   reg_vdma;   // virtual address to which VDMA register space is mapped.
+    void __iomem*   reg_cconv;  // (optional) HLS color_convert in the HDMI out path.
+    void __iomem*   reg_unpack; // (optional) HLS pixel_unpack in the HDMI out path.
 
     struct device*  dev;        // device object
     struct pynqz1_frame frame[FB_NUMBER_OF_FRAMES]; // Frame information.
@@ -152,17 +158,17 @@ struct pynqz1_fb_device {
 #define PYNQZ1_FB_FLAGS_REGISTERED (1u << 0)    // Is this framebuffer device registered ?
 
 /* register access functions */
-static u32 dynclk_read_reg(struct pynqz1_fb_device* fbdev, u32 offset) { return ioread32(fbdev->reg_dynclk + offset); }
-static void dynclk_write_reg(struct pynqz1_fb_device* fbdev, u32 offset, u32 value) { iowrite32(value, fbdev->reg_dynclk + offset); }
-static u32 vtc_read_reg(struct pynqz1_fb_device* fbdev, u32 offset) { return ioread32(fbdev->reg_vtc + offset); }
-static void vtc_write_reg(struct pynqz1_fb_device* fbdev, u32 offset, u32 value) { iowrite32(value, fbdev->reg_vtc + offset); }
+static __maybe_unused u32 dynclk_read_reg(struct pynqz1_fb_device* fbdev, u32 offset) { return ioread32(fbdev->reg_dynclk + offset); }
+static __maybe_unused void dynclk_write_reg(struct pynqz1_fb_device* fbdev, u32 offset, u32 value) { iowrite32(value, fbdev->reg_dynclk + offset); }
+static __maybe_unused u32 vtc_read_reg(struct pynqz1_fb_device* fbdev, u32 offset) { return ioread32(fbdev->reg_vtc + offset); }
+static __maybe_unused void vtc_write_reg(struct pynqz1_fb_device* fbdev, u32 offset, u32 value) { iowrite32(value, fbdev->reg_vtc + offset); }
 
-static u32 vdma_read_reg(struct pynqz1_fb_device* fbdev, u32 offset) { return ioread32(fbdev->reg_vdma + offset); }
-static void vdma_write_reg(struct pynqz1_fb_device* fbdev, u32 offset, u32 value) { iowrite32(value, fbdev->reg_vdma + offset); }
-static u32 vdma_tx_read_reg(struct pynqz1_fb_device* fbdev, u32 offset) { return ioread32(fbdev->reg_vdma + offset + VDMA_REG_TX); }
-static void vdma_tx_write_reg(struct pynqz1_fb_device* fbdev, u32 offset, u32 value) { iowrite32(value, fbdev->reg_vdma + offset + VDMA_REG_TX); }
-static u32 vdma_rx_read_reg(struct pynqz1_fb_device* fbdev, u32 offset) { return ioread32(fbdev->reg_vdma + offset + VDMA_REG_RX); }
-static void vdma_rx_write_reg(struct pynqz1_fb_device* fbdev, u32 offset, u32 value) { iowrite32(value, fbdev->reg_vdma + offset + VDMA_REG_RX); }
+static __maybe_unused u32 vdma_read_reg(struct pynqz1_fb_device* fbdev, u32 offset) { return ioread32(fbdev->reg_vdma + offset); }
+static __maybe_unused void vdma_write_reg(struct pynqz1_fb_device* fbdev, u32 offset, u32 value) { iowrite32(value, fbdev->reg_vdma + offset); }
+static __maybe_unused u32 vdma_tx_read_reg(struct pynqz1_fb_device* fbdev, u32 offset) { return ioread32(fbdev->reg_vdma + offset + VDMA_REG_TX); }
+static __maybe_unused void vdma_tx_write_reg(struct pynqz1_fb_device* fbdev, u32 offset, u32 value) { iowrite32(value, fbdev->reg_vdma + offset + VDMA_REG_TX); }
+static __maybe_unused u32 vdma_rx_read_reg(struct pynqz1_fb_device* fbdev, u32 offset) { return ioread32(fbdev->reg_vdma + offset + VDMA_REG_RX); }
+static __maybe_unused void vdma_rx_write_reg(struct pynqz1_fb_device* fbdev, u32 offset, u32 value) { iowrite32(value, fbdev->reg_vdma + offset + VDMA_REG_RX); }
 
 // PLL multiplier (feedback divider) to lock pattern lookup table
 static const u64 lock_lookup[64] = {
@@ -362,14 +368,24 @@ static int pynqz1_fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue, 
 /**
  * Framebuffer operations.
  */
-static struct fb_ops pynqz1_fb_ops =
+#if !IS_ENABLED(CONFIG_FB)
+#error "The running kernel has no fbdev support (CONFIG_FB is not set)."
+#endif
+
+static const struct fb_ops pynqz1_fb_ops =
 {
 	.owner			= THIS_MODULE,
-	.fb_blank		= pynqz1_fb_blank,      // set blank state
-	.fb_setcolreg   = pynqz1_fb_setcolreg,  // set pseudo color palette
+#if defined(FB_DEFAULT_IOMEM_OPS) && IS_ENABLED(CONFIG_FB_IOMEM_HELPERS)
+	FB_DEFAULT_IOMEM_OPS,                   // read/write/mmap + cfb_* drawing helpers (kernel >= 6.6)
+#elif IS_ENABLED(CONFIG_FB_CFB_FILLRECT) && IS_ENABLED(CONFIG_FB_CFB_COPYAREA) && IS_ENABLED(CONFIG_FB_CFB_IMAGEBLIT)
     .fb_fillrect	= cfb_fillrect,         // fill rectangle area (use default function in the kernel)
 	.fb_copyarea	= cfb_copyarea,         // copy rectangle area (use default function in the kernel)
 	.fb_imageblit	= cfb_imageblit,        // image block transfer (use default function in the kernel)
+#else
+#error "The running kernel does not provide the cfb_* fbdev drawing helpers (CONFIG_FB_CFB_*)."
+#endif
+	.fb_blank		= pynqz1_fb_blank,      // set blank state
+	.fb_setcolreg   = pynqz1_fb_setcolreg,  // set pseudo color palette
 };
 
 /**
@@ -416,9 +432,6 @@ static int pynqz1_fb_parse_dt(struct platform_device* pdev, struct pynqz1_fb_dev
 
 // Calculate page aligned framebuffer size.
 #define GET_FB_SIZE(fbdev) PAGE_ALIGN((fbdev)->width * (fbdev)->height * BYTES_PER_PIXEL)
-// Release register resource.
-#define RELEASE_REG_RESOURCE(fbdev, resource) \
-    do { if( (fbdev)->reg_##resource != NULL ) { devm_release_resource((fbdev)->dev, fbdev->reg_##resource ); fbdev->reg_##resource = NULL; } } while(0)
 
 /**
  * Release framebuffer hardware resources.
@@ -450,10 +463,12 @@ static void pynqz1_fb_release(struct pynqz1_fb_device* fbdev)
         dynclk_write_reg(fbdev, OFST_DISPLAY_CLK_L, 0);
     }
 
-    // Release memory mapped IO resources
-    RELEASE_REG_RESOURCE(fbdev, dynclk);
-    RELEASE_REG_RESOURCE(fbdev, vtc);
-    RELEASE_REG_RESOURCE(fbdev, vdma);
+    // Memory mapped IO regions are device-managed (devm_*) and released automatically.
+    fbdev->reg_dynclk = NULL;
+    fbdev->reg_vtc    = NULL;
+    fbdev->reg_vdma   = NULL;
+    fbdev->reg_cconv  = NULL;
+    fbdev->reg_unpack = NULL;
     
     // Release framebuffer memories.
     for(i = 0; i < FB_NUMBER_OF_FRAMES; i++) {
@@ -497,11 +512,18 @@ static int pynqz1_fb_probe(struct platform_device *pdev)
 
     /* Map registers to memory space. */
     {
+        static const char* const names[] = { "DYNCLK", "VTC", "VDMA", "CCONV", "UNPACK" };
+        void __iomem** const regs[] = {
+            &fbdev->reg_dynclk, &fbdev->reg_vtc, &fbdev->reg_vdma, &fbdev->reg_cconv, &fbdev->reg_unpack,
+        };
         int regIndex;
-        for(regIndex = 0; regIndex < NUMBER_OF_MEM_RESOURCES; regIndex++) {
-			void* __iomem reg;
+        for(regIndex = 0; regIndex < NUMBER_OF_MEM_RESOURCES + NUMBER_OF_OPT_MEM_RESOURCES; regIndex++) {
+			void __iomem* reg;
             struct resource* io = platform_get_resource(pdev, IORESOURCE_MEM, regIndex);
 			if(!io) {
+                if( regIndex >= NUMBER_OF_MEM_RESOURCES ) {
+                    break;  // Optional resources are not specified.
+                }
 				dev_err(&pdev->dev, "No memory resource\n");
 				RELEASE_AND_RETURN(-ENODEV);
 			}
@@ -511,13 +533,8 @@ static int pynqz1_fb_probe(struct platform_device *pdev)
 				dev_err(&pdev->dev, "Failed to map device memory\n");
                 RELEASE_AND_RETURN( PTR_ERR(reg) );
             }
-
-            switch(regIndex)
-            {
-                case 0: fbdev->reg_dynclk = reg; dev_info(&pdev->dev, "DYNCLK : %08x\n", (u32)reg); break;  // Dynclk module
-                case 1: fbdev->reg_vtc    = reg; dev_info(&pdev->dev, "VTC    : %08x\n", (u32)reg); break;  // Video Timing Controller
-                case 2: fbdev->reg_vdma   = reg; dev_info(&pdev->dev, "VDMA   : %08x\n", (u32)reg); break;  // Video DMA
-            }
+            *regs[regIndex] = reg;
+            dev_info(&pdev->dev, "%-6s : %pR\n", names[regIndex], io);
         }
     }
     
@@ -529,7 +546,7 @@ static int pynqz1_fb_probe(struct platform_device *pdev)
             virt = dma_alloc_coherent(fbdev->dev, fbsize, &fbdev->frame[i].phys, GFP_KERNEL);
 			if( !virt ) {
 				dev_err(&pdev->dev, "Failed to allocate frame buffer\n");
-				return -ENOMEM;
+				RELEASE_AND_RETURN(-ENOMEM);
 			}
             memset_io((void __iomem *)virt, 0, fbsize); // Clear
 			fbdev->frame[i].virt = virt;
@@ -651,6 +668,28 @@ static int pynqz1_fb_probe(struct platform_device *pdev)
     }
     dev_info(&pdev->dev, "VTC configured.\n");
 
+    /* Configure the HLS pixel_unpack / color_convert blocks of PYNQ v2.x+ base overlays, if present. */
+    if( fbdev->reg_unpack != NULL ) {
+        // Mode register: 0 = 24 bpp (3 bytes per pixel in memory, passed through unchanged).
+        iowrite32(PIXEL_UNPACK_MODE_24BPP, fbdev->reg_unpack + PIXEL_UNPACK_REG_MODE);
+        dev_info(&pdev->dev, "pixel_unpack configured (24bpp).\n");
+    }
+    if( fbdev->reg_cconv != NULL ) {
+        // 3x3 matrix (row-major) + 3 offsets, 10-bit signed fixed point with 8 fractional bits.
+        // Identity matrix: memory layout B,G,R (= RGB888 with red at bit 16) goes through unchanged.
+        static const u32 identity[COLOR_CONVERT_NUM_COEFFS] = {
+            0x100, 0, 0,
+            0, 0x100, 0,
+            0, 0, 0x100,
+            0, 0, 0,
+        };
+        int i;
+        for(i = 0; i < COLOR_CONVERT_NUM_COEFFS; i++) {
+            iowrite32(identity[i], fbdev->reg_cconv + COLOR_CONVERT_REG_COEFF(i));
+        }
+        dev_info(&pdev->dev, "color_convert configured (identity).\n");
+    }
+
     /* Initialize VDMA */
     {
         u32 cr = 0;
@@ -667,7 +706,7 @@ static int pynqz1_fb_probe(struct platform_device *pdev)
 
         for(i = 0; i < FB_NUMBER_OF_FRAMES; i++) {
             u32 reg = VDMA_REG_MM2S_ADDR+VDMA_REG_START_ADDR+i*VDMA_START_ADDR_LEN;
-            vdma_write_reg(fbdev, reg, fbdev->frame[i].phys);
+            vdma_write_reg(fbdev, reg, (u32)fbdev->frame[i].phys);
         }
 
         // Start VDMA TX channel
@@ -691,7 +730,7 @@ static int pynqz1_fb_probe(struct platform_device *pdev)
     rc = register_framebuffer(&fbdev->info);
     if( rc ) {
         dev_err(&pdev->dev, "Could not register frame buffer\n");
-        RELEASE_AND_RETURN(1);
+        RELEASE_AND_RETURN(rc);
     }
 
     fbdev->flags |= PYNQZ1_FB_FLAGS_REGISTERED;
@@ -703,13 +742,19 @@ static int pynqz1_fb_probe(struct platform_device *pdev)
 /**
  * Remove this framebuffer driver
  */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+static void pynqz1_fb_remove(struct platform_device *pdev)
+#else
 static int pynqz1_fb_remove(struct platform_device *pdev)
+#endif
 {
 	struct pynqz1_fb_device* fbdev = (struct pynqz1_fb_device*)platform_get_drvdata(pdev);
     if( fbdev != NULL ) {
         pynqz1_fb_release(fbdev);
     }
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
 	return 0;
+#endif
 }
 
 static const struct of_device_id pynqz1_fb_of_ids[] = {
