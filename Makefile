@@ -40,13 +40,10 @@ LOCAL_KDIR := $(PWD)/kernel-build
 # Use the prepared local copy (see 'make kdir') when it exists, else the system headers.
 KDIR ?= $(if $(wildcard $(LOCAL_KDIR)/scripts/mod/modpost),$(LOCAL_KDIR),$(SYS_KDIR))
 
-# linux-xlnx ref matching the running kernel: used for the fbdev core sources (when the kernel
-# lacks CONFIG_FB) and for files missing from the kernel headers package.
+# linux-xlnx ref whose fbdev core sources are used when the kernel lacks CONFIG_FB.
 # PYNQ v3.1 (kernel 6.6.10-xilinx-v2024.1) is built from this tag.
 FBCORE_REPO ?= https://github.com/Xilinx/linux-xlnx
 FBCORE_REF  ?= xlnx_rebase_v6.6_LTS_2024.1
-LINUX_RAW   ?= https://raw.githubusercontent.com/Xilinx/linux-xlnx/$(FBCORE_REF)
-KARCH       := $(shell uname -m | sed -e 's/^arm.*/arm/' -e 's/^aarch64$$/arm64/')
 
 KERNEL_HAS_FB := $(shell grep -qE '^CONFIG_FB=(y|m)' $(KDIR)/.config && echo y)
 ifneq ($(KERNEL_HAS_FB),y)
@@ -83,21 +80,19 @@ fbdev/core/fbmem.c:
 	cp -r .fbcore-src/drivers/video/fbdev/core .fbcore-src/drivers/video/fbdev/edid.h fbdev/
 	rm -rf .fbcore-src
 
-# The kernel headers package on PYNQ images is not prepared (no fixdep/modpost) and lacks a few
-# files that 'modules_prepare' needs. Create a prepared, user-owned copy in kernel-build/.
-KDIR_FETCH   := Kbuild kernel/bounds.c kernel/time/timeconst.bc arch/$(KARCH)/kernel/asm-offsets.c
-# modules_prepare re-runs Kconfig/codegen with the local compiler; these are restored afterwards
+# The kernel headers package on PYNQ images is not prepared (no fixdep/modpost) and lacks the
+# top-level Kbuild, which makes 'modules_prepare' recurse endlessly. Its generated headers
+# (asm-offsets.h, bounds.h, ...) ship prebuilt, so a stub Kbuild with an empty 'prepare' is
+# enough to build the host tools. This creates a prepared, user-owned copy in kernel-build/.
+# modules_prepare re-runs Kconfig with the local compiler; these files are restored afterwards
 # so that modules match the running kernel exactly (incl. its release string).
 KDIR_RESTORE := .config include/config/auto.conf include/generated/autoconf.h \
-	include/config/kernel.release include/generated/utsrelease.h \
-	include/generated/asm-offsets.h include/generated/bounds.h include/generated/timeconst.h
+	include/config/kernel.release include/generated/utsrelease.h
 
 kdir:
 	rm -rf $(LOCAL_KDIR)
 	cp -a $(SYS_KDIR)/. $(LOCAL_KDIR)
-	for f in $(KDIR_FETCH); do \
-		test -e $(LOCAL_KDIR)/$$f || curl -fsSL --create-dirs -o $(LOCAL_KDIR)/$$f $(LINUX_RAW)/$$f || exit 1; \
-	done
+	test -e $(LOCAL_KDIR)/Kbuild || printf 'PHONY += prepare\nprepare:\n\t@:\n' > $(LOCAL_KDIR)/Kbuild
 	$(MAKE) -C $(LOCAL_KDIR) $(if $(KCC),CC=$(KCC)) modules_prepare
 	for f in $(KDIR_RESTORE); do cp -p $(SYS_KDIR)/$$f $(LOCAL_KDIR)/$$f || exit 1; done
 	@echo "Prepared kernel build tree for $$(cat $(LOCAL_KDIR)/include/config/kernel.release) in $(LOCAL_KDIR)"

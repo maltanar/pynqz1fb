@@ -17,7 +17,7 @@ How it fits together on PYNQ v3.1:
   fetches the fbdev core sources from the matching linux-xlnx tag and builds them as an extra module,
   `fbcore.ko`, which provides `/dev/fb0` (no framebuffer text console). The kernel itself is not changed.
 * **Kernel headers need preparing.** The headers package on the image has no `fixdep`/`modpost` and
-  lacks a few files, so `make modules_prepare` on it does not work. `make kdir` makes a prepared,
+  lacks the top-level `Kbuild`, so `make modules_prepare` on it loops forever. `make kdir` makes a prepared,
   user-owned copy in `kernel-build/`, which later builds use automatically.
 * **gcc 12 is required.** The kernel was built with gcc 12 and its hardening flags are not understood
   by Ubuntu 22.04's default gcc 11. The Makefile picks `gcc-12` automatically.
@@ -29,7 +29,7 @@ How it fits together on PYNQ v3.1:
 
 ```
 sudo apt-get install -y gcc-12 build-essential bc bison flex libssl-dev device-tree-compiler
-make kdir     # once per kernel version: prepares kernel-build/ (a few minutes)
+make kdir     # once per kernel version: prepares kernel-build/ (~15 min on a PYNQ-Z2)
 make          # builds fbcore.ko, pynqz1fb.ko and pynqz2fb.dtbo
 ```
 
