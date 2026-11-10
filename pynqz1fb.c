@@ -93,12 +93,13 @@ struct pynqz1_frame {
 #define PALETTE_ENTRIES_NO 16
 
 
+// Parameters of the axi_dynclk MMCM: VCO = 100 MHz * fbmult / maindiv, output = VCO / clkdiv.
 struct dynclk_param
 {
-    u16     prescaler;
-    u16     multiplier;
-    u16     postscaler;
-    u16     reserved;
+    u32     clkdiv;     // output divider (CLK_L)
+    u32     fbmult;     // feedback multiplier (FB_L), 2..64
+    u32     maindiv;    // input divider (DIV)
+    u32     freq_khz;   // resulting output frequency
 };
 
 struct pynqz1_fb_screen_param
@@ -114,16 +115,16 @@ struct pynqz1_fb_screen_param
     u32     vSyncStart;
     u32     vSyncEnd;
 
-    struct dynclk_param dynclk;
+    u32     pixclk_khz; // pixel clock
 };
 static struct pynqz1_fb_screen_param pynqz1_fb_screen_params[] = {
-    /*w,    h,    hfsz, hss,  hse,  vfsz, vss,  vse,   pre, mul, post, rsvd */
-    { 640,  480,  800,  656,  752,  525,  489,  491,  {1, 10, 8, 0} },
-    { 800,  480,  1056, 840,  968,  525,  489,  491,  {1, 10, 6, 0} },
-    { 800,  600,  1056, 840,  968,  628,  600,  604,  {1, 8,  4, 0} },
-    { 1280, 720,  1650, 1390, 1430, 750,  724,  729,  {4, 30, 1, 0} },
-    { 1280, 1024, 1688, 1328, 1440, 1066, 1024, 1027, {8, 86, 2, 0} },
-    { 1920, 1080, 2200, 2008, 2052, 1125, 1083, 1088, {12,89, 1, 0} },
+    /*w,    h,    hfsz, hss,  hse,  vfsz, vss,  vse,   pixclk (kHz) */
+    { 640,  480,  800,  656,  752,  525,  489,  491,   25175 },
+    { 800,  480,  1056, 840,  968,  525,  489,  491,   33264 },
+    { 800,  600,  1056, 840,  968,  628,  600,  604,   40000 },
+    { 1280, 720,  1650, 1390, 1430, 750,  724,  729,   74250 },
+    { 1280, 1024, 1688, 1328, 1440, 1066, 1024, 1027, 108000 },
+    { 1920, 1080, 2200, 2008, 2052, 1125, 1083, 1088, 148500 },
     { 0 },
 };
 
@@ -312,19 +313,69 @@ static const u32 filter_lookup_low[64] = {
  */
 static u32 dynclk_calculate_divider(u32 divisor)
 {
-	u32 clock_on = divisor / 2;
-	u32 clock_off = divisor - clock_on;
+	u32 clock_on = divisor / 2;             // high time
+	u32 clock_off = divisor - clock_on;     // low time (one longer for odd divisors)
 	u32 reg_value = 0;
     if( divisor == 1) {
         return 0x1041u;
     }
 	if( divisor & 1 ) {
 		reg_value = 1u << CLK_BIT_WEDGE;
-		clock_off++;
 	}
 	reg_value |= (clock_off & 0x3fu) << 0;
 	reg_value |= (clock_on  & 0x3fu) << 6;
 	return reg_value;
+}
+
+/**
+ * Find MMCM parameters for a pixel clock.
+ * Ported from DisplayClkFindParams() in PYNQ's video_display.c: the MMCM generates 5x the pixel
+ * clock (the serial clock for rgb2dvi), from a 100 MHz reference, with a VCO of 600-1200 MHz and
+ * a feedback multiplier of at most 64. Returns the absolute error in kHz (at 5x the pixel clock).
+ */
+static u32 dynclk_find_params(u32 pixclk_khz, struct dynclk_param* best)
+{
+    const u32 ref_khz = 100000;
+    const u32 target_khz = pixclk_khz * 5;
+    u32 best_err = U32_MAX;
+    u32 maindiv, fbmult;
+
+    for(maindiv = 1; maindiv <= 10; maindiv++) {
+        u32 max_fb = min(maindiv * 12, 64u);
+        for(fbmult = maindiv * 6; fbmult <= max_fb; fbmult++) {
+            u32 vco_khz = ref_khz * fbmult / maindiv;
+            u32 clkdiv = DIV_ROUND_CLOSEST(vco_khz, target_khz);
+            u32 freq_khz, err;
+            if( clkdiv < 1 || clkdiv > 126 ) {
+                continue;
+            }
+            freq_khz = vco_khz / clkdiv;
+            err = freq_khz > target_khz ? freq_khz - target_khz : target_khz - freq_khz;
+            if( err < best_err ) {
+                best_err = err;
+                best->clkdiv = clkdiv;
+                best->fbmult = fbmult;
+                best->maindiv = maindiv;
+                best->freq_khz = freq_khz;
+            }
+        }
+    }
+    return best_err;
+}
+
+/**
+ * Wait until the dynclk "running" status bit reaches the requested state.
+ */
+static int dynclk_wait_running(struct pynqz1_fb_device* fbdev, bool running)
+{
+    int i;
+    for(i = 0; i < 100; i++) {
+        if( !!(dynclk_read_reg(fbdev, OFST_DISPLAY_STATUS) & (1u << BIT_CLOCK_RUNNING)) == running ) {
+            return 0;
+        }
+        usleep_range(1000, 2000);
+    }
+    return -ETIMEDOUT;
 }
 
 /**
@@ -575,20 +626,23 @@ static int pynqz1_fb_probe(struct platform_device *pdev)
 
     /* Enable dynamically generated clock */
     dynclk_write_reg(fbdev, OFST_DISPLAY_CTRL, 0);
-    mdelay(1);
-	if( dynclk_read_reg(fbdev, OFST_DISPLAY_STATUS) & (1u << BIT_CLOCK_RUNNING) ) {
+	if( dynclk_wait_running(fbdev, false) ) {
 		dev_err(&pdev->dev, "Failed to stop dynamic clock.\n");
-		RELEASE_AND_RETURN(-ENOMEM);
+		RELEASE_AND_RETURN(-ETIMEDOUT);
 	}
 
 	{
-		// Configure Dynamic clock module to generate required pixel rate.
-        // Required pixel rate = (frame width*(frame height)*(vfreq)*5 for HDMI output.
-        u32 clk_l   = dynclk_calculate_divider_config(fbdev->screen_param->dynclk.prescaler);
-        u32 fb_l    = dynclk_calculate_divider_config(fbdev->screen_param->dynclk.multiplier);
-        u32 div_    = dynclk_calculate_divider(fbdev->screen_param->dynclk.postscaler);
-        u32 lock_l  = (u32)(lock_lookup[8 - 1] & 0xffffffffu);
-		u32 filter_lock_h = (u32)(lock_lookup[8 - 1] >> 32) | ((filter_lookup_low[8 - 1] & 0x3ffu) << 16);
+		// Configure Dynamic clock module to generate 5x the pixel clock for HDMI output.
+        struct dynclk_param param;
+        u32 err_khz = dynclk_find_params(fbdev->screen_param->pixclk_khz, &param);
+        u32 clk_l   = dynclk_calculate_divider_config(param.clkdiv);
+        u32 fb_l    = dynclk_calculate_divider_config(param.fbmult);
+        u32 div_    = dynclk_calculate_divider(param.maindiv);
+        u32 lock_l  = (u32)(lock_lookup[param.fbmult - 1] & 0xffffffffu);
+		u32 filter_lock_h = (u32)((lock_lookup[param.fbmult - 1] >> 32) & 0xffu) | ((filter_lookup_low[param.fbmult - 1] & 0x3ffu) << 16);
+
+        dev_info(fbdev->dev, "DYNCLK pixel clock %u kHz -> %u kHz (M=%u, D=%u, O=%u, error %u kHz at 5x)\n",
+                 fbdev->screen_param->pixclk_khz, param.freq_khz / 5, param.fbmult, param.maindiv, param.clkdiv, err_khz);
 
         dev_info(fbdev->dev, "DYNCLK CLK_L        : %08x\n", clk_l);
         dev_info(fbdev->dev, "DYNCLK FB_L         : %08x\n", fb_l);
@@ -605,10 +659,9 @@ static int pynqz1_fb_probe(struct platform_device *pdev)
 	}
 
     dynclk_write_reg(fbdev, OFST_DISPLAY_CTRL, (1u << BIT_DISPLAY_START) );
-    mdelay(1);
-	if( !(dynclk_read_reg(fbdev, OFST_DISPLAY_STATUS) & (1u << BIT_CLOCK_RUNNING)) ) {
+	if( dynclk_wait_running(fbdev, true) ) {
 		dev_err(&pdev->dev, "Failed to start dynamic clock.\n");
-		RELEASE_AND_RETURN(-ENOMEM);
+		RELEASE_AND_RETURN(-ETIMEDOUT);
 	}
     dev_info(&pdev->dev, "DYNCLK configured.\n");
 
