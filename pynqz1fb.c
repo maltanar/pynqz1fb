@@ -360,7 +360,7 @@ static int pynqz1_fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue, 
 	red >>= 8;
 	green >>= 8;
 	blue >>= 8;
-	palette[regno] = (red << RED_SHIFT) | (green << GREEN_SHIFT) | (blue << BLUE_SHIFT);
+	palette[regno] = (red << info->var.red.offset) | (green << info->var.green.offset) | (blue << info->var.blue.offset);
 
 	return 0;
 }
@@ -676,18 +676,22 @@ static int pynqz1_fb_probe(struct platform_device *pdev)
     }
     if( fbdev->reg_cconv != NULL ) {
         // 3x3 matrix (row-major) + 3 offsets, 10-bit signed fixed point with 8 fractional bits.
-        // Identity matrix: memory layout B,G,R (= RGB888 with red at bit 16) goes through unchanged.
-        static const u32 identity[COLOR_CONVERT_NUM_COEFFS] = {
-            0x100, 0, 0,
-            0, 0x100, 0,
+        // Swap the first and third channel (same as PYNQ's PIXEL_RGB), so that the frame buffer
+        // memory layout is R,G,B (red at bit 0). Qt5's linuxfb backend only renders 24bpp
+        // correctly with this layout; other fbdev clients follow the bitfields below.
+        static const u32 rgb_swap[COLOR_CONVERT_NUM_COEFFS] = {
             0, 0, 0x100,
+            0, 0x100, 0,
+            0x100, 0, 0,
             0, 0, 0,
         };
         int i;
         for(i = 0; i < COLOR_CONVERT_NUM_COEFFS; i++) {
-            iowrite32(identity[i], fbdev->reg_cconv + COLOR_CONVERT_REG_COEFF(i));
+            iowrite32(rgb_swap[i], fbdev->reg_cconv + COLOR_CONVERT_REG_COEFF(i));
         }
-        dev_info(&pdev->dev, "color_convert configured (identity).\n");
+        fbdev->info.var.red.offset  = 0;
+        fbdev->info.var.blue.offset = 16;
+        dev_info(&pdev->dev, "color_convert configured (R,G,B memory layout).\n");
     }
 
     /* Initialize VDMA */

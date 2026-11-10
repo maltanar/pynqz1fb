@@ -1,0 +1,11 @@
+/fbdev/
+/.fbcore-src/
+*.o
+*.ko
+*.mod
+*.mod.c
+.*.cmd
+*.dtbo
+Module.symvers
+modules.order
+/kernel-build/

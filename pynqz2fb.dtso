@@ -1,0 +1,28 @@
+/*
+ * Device tree overlay for the PYNQ framebuffer on PYNQ-Z2 (PYNQ v3.x, base overlay).
+ * Apply at runtime via configfs after base.bit is loaded; see readme.md.
+ *
+ * Addresses are taken from boards/Pynq-Z2/base/base.tcl (PYNQ v3.1).
+ */
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+			pynq-fb@43c10000 {
+				compatible = "fugafuga,pynqz1_fb";
+				reg = <0x43c10000 0x10000	/* hdmi_out/frontend/axi_dynclk */
+				       0x43c20000 0x10000	/* hdmi_out/frontend/vtc_out    */
+				       0x43000000 0x10000	/* axi_vdma                     */
+				       0x43c60000 0x10000	/* hdmi_out/color_convert       */
+				       0x43c70000 0x10000>;	/* hdmi_out/pixel_unpack        */
+				debug = <0>;
+				/* Supported: 640x480, 800x480, 800x600, 1280x720, 1280x1024, 1920x1080 */
+				width = <1280>;
+				height = <720>;
+			};
+		};
+	};
+};

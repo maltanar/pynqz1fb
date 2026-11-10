@@ -8,61 +8,72 @@ which enables to use applications which supports kernel framebuffer device to re
 
 ## PYNQ-Z2 with PYNQ v3.x (native build on the board)
 
-The driver has been ported to current kernels (PYNQ v3.1 ships a Petalinux 2024.1 / 6.6-series kernel).
-It is built natively on the board against the installed kernel headers, and it is attached to the
-hardware with a runtime device-tree overlay ([`pynqz2fb.dtso`](pynqz2fb.dtso)). You do not need to
-replace any file on the boot partition: on PYNQ v3.x the device tree is inside `image.ub`.
+The driver has been ported to current kernels and is built natively on the board.
+Tested on a PYNQ-Z2 with PYNQ v3.1 (kernel `6.6.10-xilinx-v2024.1`) and the base overlay.
 
-Run all of the following on the board as root (`sudo -i`):
+How it fits together on PYNQ v3.1:
 
-1. Install build dependencies.
+* **No fbdev in the stock kernel.** PYNQ v3.1 kernels are built without `CONFIG_FB`. The build then
+  fetches the fbdev core sources from the matching linux-xlnx tag and builds them as an extra module,
+  `fbcore.ko`, which provides `/dev/fb0` (no framebuffer text console). The kernel itself is not changed.
+* **Kernel headers need preparing.** The headers package on the image has no `fixdep`/`modpost` and
+  lacks a few files, so `make modules_prepare` on it does not work. `make kdir` makes a prepared,
+  user-owned copy in `kernel-build/`, which later builds use automatically.
+* **gcc 12 is required.** The kernel was built with gcc 12 and its hardening flags are not understood
+  by Ubuntu 22.04's default gcc 11. The Makefile picks `gcc-12` automatically.
+* **Runtime device-tree overlay.** On PYNQ v3.x the device tree is inside `image.ub`, so the hardware
+  is described with [`pynqz2fb.dtso`](pynqz2fb.dtso), applied at runtime. Nothing on the boot
+  partition is modified.
 
-    ```
-    apt-get install -y build-essential bc bison flex libssl-dev device-tree-compiler
-    ```
+### Build (as user `xilinx`)
 
-2. Check that kernel headers for the running kernel exist and are prepared.
+```
+sudo apt-get install -y gcc-12 build-essential bc bison flex libssl-dev device-tree-compiler
+make kdir     # once per kernel version: prepares kernel-build/ (a few minutes)
+make          # builds fbcore.ko, pynqz1fb.ko and pynqz2fb.dtbo
+```
 
-    ```
-    ls /lib/modules/$(uname -r)/build
-    # If kbuild later complains about missing scripts/ binaries (fixdep, modpost), prepare them once:
-    make -C /lib/modules/$(uname -r)/build modules_prepare
-    ```
+The display resolution is set in `pynqz2fb.dtso` (`width`/`height`, default 1280x720).
+Supported modes are 640x480, 800x480, 800x600, 1280x720, 1280x1024 and 1920x1080.
+After changing it, run `make dtbo`.
 
-    A "compiler differs from the one used to build the kernel" warning is expected and harmless.
+### Load (as root, `sudo -i`)
 
-3. Build the module and the overlay. This produces `pynqz1fb.ko` and `pynqz2fb.dtbo`.
+```
+cd /home/xilinx/pynqz1fb
 
-    ```
-    make
-    ```
+# 1. Load the base overlay bitstream (also sets up the PL clocks)
+source /etc/profile.d/xrt_setup.sh
+source /etc/profile.d/pynq_venv.sh
+python3 -c "import os, pynq.overlays.base as b; from pynq import Overlay; Overlay(os.path.join(os.path.dirname(b.__file__), 'base.bit'))"
+deactivate
 
-    The display resolution is set in `pynqz2fb.dtso` (`width`/`height`, default 1280x720).
-    Supported modes are 640x480, 800x480, 800x600, 1280x720, 1280x1024 and 1920x1080.
+# 2. Describe the HDMI-out hardware to the kernel
+mkdir /sys/kernel/config/device-tree/overlays/pynqfb
+cat pynqz2fb.dtbo > /sys/kernel/config/device-tree/overlays/pynqfb/dtbo
+cat /sys/kernel/config/device-tree/overlays/pynqfb/status      # expect: applied
 
-4. Load the base overlay bitstream. This also sets up the PL clocks.
+# 3. Load the framebuffer core (only built if the kernel lacks CONFIG_FB) and the driver
+insmod fbcore.ko
+insmod pynqz1fb.ko
+dmesg | tail -n 20
+```
 
-    ```
-    source /etc/profile.d/pynq_venv.sh
-    python3 -c "from pynq import Overlay; Overlay('base.bit')"
-    ```
+To unload, run `rmmod pynqz1fb fbcore` and then `rmdir /sys/kernel/config/device-tree/overlays/pynqfb`.
+Always unload the driver before downloading another bitstream (also from Jupyter): reprogramming
+the PL while the VDMA is running hangs the bus.
 
-5. Apply the device-tree overlay and load the driver.
+### PyQt applications
 
-    ```
-    mkdir /sys/kernel/config/device-tree/overlays/pynqfb
-    cat pynqz2fb.dtbo > /sys/kernel/config/device-tree/overlays/pynqfb/dtbo
-    cat /sys/kernel/config/device-tree/overlays/pynqfb/status   # should print "applied"
-    insmod ./pynqz1fb.ko
-    dmesg | tail -n 20
-    ```
+Qt can draw directly to the framebuffer with its `linuxfb` backend; no X server is needed.
+Mouse and keyboard are read through evdev. Install PyQt5 with `apt-get install python3-pyqt5`
+and run applications with the system Python as root:
 
-To unload, run `rmmod pynqz1fb` and then `rmdir /sys/kernel/config/device-tree/overlays/pynqfb`.
-Always unload the driver before downloading another bitstream; reprogramming the PL while the
-VDMA is running will hang the bus.
+```
+QT_QPA_PLATFORM=linuxfb:fb=/dev/fb0 /usr/bin/python3 examples/qt_test.py
+```
 
-The kernel must have fbdev support (`CONFIG_FB` plus the `cfb_*` / fb I/O helpers). If not,
-the build stops with an explicit `#error`. In that case check with `zcat /proc/config.gz | grep CONFIG_FB`.
+[`examples/qt_test.py`](examples/qt_test.py) shows red, green and blue bars to check the colour order.
 
 The instructions below are for the original PYNQ-Z1 image released in 2017.
 
