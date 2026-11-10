@@ -138,6 +138,7 @@
 // PYNQ HLS pixel_unpack (PYNQ v2.x+ base overlay HDMI out path)
 #define PIXEL_UNPACK_REG_MODE   0x10
 #define PIXEL_UNPACK_MODE_24BPP 0
+#define PIXEL_UNPACK_MODE_32BPP 1
 
 // PYNQ HLS color_convert (PYNQ v2.x+ base overlay HDMI out path)
 #define COLOR_CONVERT_NUM_COEFFS 12

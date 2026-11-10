@@ -35,7 +35,8 @@ make          # builds fbcore.ko, pynqz1fb.ko and pynqz2fb.dtbo
 
 The display resolution is set in `pynqz2fb.dtso` (`width`/`height`, default 1280x720).
 Supported modes are 640x480, 800x480, 800x600, 1280x720, 1280x1024 and 1920x1080.
-After changing it, run `make dtbo`.
+The frame buffer is 32bpp XRGB8888 by default; add `bpp = <24>;` for 24bpp.
+After changing it, run `make dtbo` and reload (see below).
 
 ### Load (as root, `sudo -i`)
 
@@ -63,6 +64,9 @@ To unload, run `rmmod pynqz1fb fbcore` and then `rmdir /sys/kernel/config/device
 Always unload the driver before downloading another bitstream (also from Jupyter): reprogramming
 the PL while the VDMA is running hangs the bus.
 
+If the probe fails (for example "Failed to start dynamic clock"), the clock generator can be left
+in a bad state: unload, then repeat the whole sequence including loading `base.bit`.
+
 ### PyQt applications
 
 Qt can draw directly to the framebuffer with its `linuxfb` backend; no X server is needed.
@@ -74,6 +78,21 @@ QT_QPA_PLATFORM=linuxfb:fb=/dev/fb0 /usr/bin/python3 examples/qt_test.py
 ```
 
 [`examples/qt_test.py`](examples/qt_test.py) shows red, green and blue bars to check the colour order.
+
+[`examples/dashboard.py`](examples/dashboard.py) is a larger demo: an image slideshow (decoded in a
+background thread, cross-faded), a live CPU/temperature chart, animated KPI tiles and a UI frame
+rate counter. Measured at 1920x1080 on a PYNQ-Z2: 17-35 UI fps normally and 3-10 fps during
+full-size image cross-fades, with one CPU core saturated by Qt's software rendering. Use 720p
+and avoid large animated areas for smoother results.
+
+USB mouse note: the Zynq USB host can service only a limited number of 1 ms interrupt endpoints.
+Gaming mice with several interfaces (e.g. Razer Naga Trinity) then fail to open with
+"Device or resource busy" and Qt shows no cursor. Disabling the extra keyboard interface helps,
+e.g. with a udev rule (`/etc/udev/rules.d/99-razer-naga-zynq.rules`):
+
+```
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0067", ATTR{bInterfaceNumber}=="02", ATTR{authorized}="0"
+```
 
 The instructions below are for the original PYNQ-Z1 image released in 2017.
 

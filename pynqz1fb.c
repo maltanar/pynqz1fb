@@ -49,8 +49,9 @@
 
 #define DRIVER_NAME		"pynqz1_fb"
 
-#define BYTES_PER_PIXEL	3
-#define BITS_PER_PIXEL	(BYTES_PER_PIXEL * 8)
+// Default pixel format: 32bpp XRGB8888 (needs pixel_unpack), else 24bpp.
+// Can be overridden with the "bpp" device tree property (24 or 32).
+#define DEFAULT_BITS_PER_PIXEL	32
 
 #define RED_SHIFT	16
 #define GREEN_SHIFT	8
@@ -65,7 +66,6 @@ static struct fb_fix_screeninfo pynqz1_fb_fix = {
 };
 
 static struct fb_var_screeninfo pynqz1_fb_var = {
-	.bits_per_pixel =	BITS_PER_PIXEL,
 
 	.red =		{ RED_SHIFT, 8, 0 },
 	.green =	{ GREEN_SHIFT, 8, 0 },
@@ -149,6 +149,8 @@ struct pynqz1_fb_device {
     u32 width;  // Number of horizontal pixels .
     u32 height; // Number of virtual pixels.
     u32 stride; // Number of bytes in a horizontal line.
+
+    u32 bytes_per_pixel;    // 3 (24bpp, RGB888) or 4 (32bpp, XRGB8888)
 
     u32 debug;  // Debug level
 
@@ -476,13 +478,23 @@ static int pynqz1_fb_parse_dt(struct platform_device* pdev, struct pynqz1_fb_dev
     }
     fbdev->screen_param = screen_param;
 
+    {
+        u32 bpp = DEFAULT_BITS_PER_PIXEL;
+        of_property_read_u32(np, "bpp", &bpp);
+        if( bpp != 24 && bpp != 32 ) {
+            dev_info(&pdev->dev, "Unsupported bpp %u, using %u.\n", bpp, DEFAULT_BITS_PER_PIXEL);
+            bpp = DEFAULT_BITS_PER_PIXEL;
+        }
+        fbdev->bytes_per_pixel = bpp / 8;
+    }
+
     ret = of_property_read_u32(np, "debug", &fbdev->debug);
 
     return 0;
 }
 
 // Calculate page aligned framebuffer size.
-#define GET_FB_SIZE(fbdev) PAGE_ALIGN((fbdev)->width * (fbdev)->height * BYTES_PER_PIXEL)
+#define GET_FB_SIZE(fbdev) PAGE_ALIGN((fbdev)->width * (fbdev)->height * (fbdev)->bytes_per_pixel)
 
 /**
  * Release framebuffer hardware resources.
@@ -559,7 +571,6 @@ static int pynqz1_fb_probe(struct platform_device *pdev)
     if( rc ) {
         return rc;
     }
-    fbsize = GET_FB_SIZE(fbdev);
 
     /* Map registers to memory space. */
     {
@@ -588,6 +599,13 @@ static int pynqz1_fb_probe(struct platform_device *pdev)
             dev_info(&pdev->dev, "%-6s : %pR\n", names[regIndex], io);
         }
     }
+
+    // 32bpp needs pixel_unpack to drop the padding byte; without it the VDMA streams 24bpp.
+    if( fbdev->reg_unpack == NULL && fbdev->bytes_per_pixel != 3 ) {
+        dev_info(&pdev->dev, "No pixel_unpack block, using 24bpp.\n");
+        fbdev->bytes_per_pixel = 3;
+    }
+    fbsize = GET_FB_SIZE(fbdev);
     
     /* Allocate framebuffer */
     {
@@ -605,7 +623,7 @@ static int pynqz1_fb_probe(struct platform_device *pdev)
     }
     
     /* Initialize other framebuffer parameters */
-    fbdev->stride = fbdev->width*BYTES_PER_PIXEL;                   // Stride (bytes per line)
+    fbdev->stride = fbdev->width*fbdev->bytes_per_pixel;                   // Stride (bytes per line)
 
     fbdev->info.device = fbdev->dev;                                
     fbdev->info.pseudo_palette = fbdev->pseudo_palette;             // Pseudo color palette which is used to render console characters.
@@ -617,12 +635,15 @@ static int pynqz1_fb_probe(struct platform_device *pdev)
 	fbdev->info.fix.line_length = fbdev->stride;                    // Bytes per line (stride) of frame buffer lines.
 	
     fbdev->info.var = pynqz1_fb_var;                                // Variable (changeable by request) parameters.
+    fbdev->info.var.bits_per_pixel = fbdev->bytes_per_pixel * 8;    // 24 (RGB888) or 32 (XRGB8888)
     fbdev->info.var.xres = fbdev->screen_param->width;              // X resolution of the frame buffer.
     fbdev->info.var.yres = fbdev->screen_param->height;             // Y resolution
     fbdev->info.var.xres_virtual = fbdev->info.var.xres;            // Virtual X resolution
     fbdev->info.var.yres_virtual = fbdev->info.var.yres;            // Virtual Y resolution
-    fbdev->info.var.width  = (u32)(fbdev->info.var.xres*5/96/2);    // Physical screen width in millimeters
-    fbdev->info.var.height = (u32)(fbdev->info.var.yres*5/96/2);    // Physical screen height in millimeters
+    // Physical size in millimeters, assuming 96 DPI (the real size is unknown without EDID).
+    // Qt derives its DPI from this, so it must be plausible or point-sized fonts are scaled wrongly.
+    fbdev->info.var.width  = fbdev->info.var.xres * 254 / 960;
+    fbdev->info.var.height = fbdev->info.var.yres * 254 / 960;
 
     /* Enable dynamically generated clock */
     dynclk_write_reg(fbdev, OFST_DISPLAY_CTRL, 0);
@@ -723,15 +744,33 @@ static int pynqz1_fb_probe(struct platform_device *pdev)
 
     /* Configure the HLS pixel_unpack / color_convert blocks of PYNQ v2.x+ base overlays, if present. */
     if( fbdev->reg_unpack != NULL ) {
-        // Mode register: 0 = 24 bpp (3 bytes per pixel in memory, passed through unchanged).
-        iowrite32(PIXEL_UNPACK_MODE_24BPP, fbdev->reg_unpack + PIXEL_UNPACK_REG_MODE);
-        dev_info(&pdev->dev, "pixel_unpack configured (24bpp).\n");
+        // Mode register: 0 = 24 bpp (3 bytes per pixel), 1 = 32 bpp (4th byte dropped).
+        u32 mode = fbdev->bytes_per_pixel == 4 ? PIXEL_UNPACK_MODE_32BPP : PIXEL_UNPACK_MODE_24BPP;
+        iowrite32(mode, fbdev->reg_unpack + PIXEL_UNPACK_REG_MODE);
+        dev_info(&pdev->dev, "pixel_unpack configured (%ubpp).\n", fbdev->bytes_per_pixel * 8);
     }
-    if( fbdev->reg_cconv != NULL ) {
+    if( fbdev->reg_cconv != NULL && fbdev->bytes_per_pixel == 4 ) {
+        // 3x3 matrix (row-major) + 3 offsets, 10-bit signed fixed point with 8 fractional bits.
+        // Identity: memory bytes B,G,R,X = little-endian XRGB8888 (red at bit 16), which is what
+        // Qt (Format_RGB32) and other fbdev clients expect. Note that pixel_unpack orders the
+        // channels differently in 32bpp mode than in 24bpp mode, which needs a swap (see below).
+        static const u32 identity[COLOR_CONVERT_NUM_COEFFS] = {
+            0x100, 0, 0,
+            0, 0x100, 0,
+            0, 0, 0x100,
+            0, 0, 0,
+        };
+        int i;
+        for(i = 0; i < COLOR_CONVERT_NUM_COEFFS; i++) {
+            iowrite32(identity[i], fbdev->reg_cconv + COLOR_CONVERT_REG_COEFF(i));
+        }
+        dev_info(&pdev->dev, "color_convert configured (XRGB8888).\n");
+    }
+    else if( fbdev->reg_cconv != NULL ) {
         // 3x3 matrix (row-major) + 3 offsets, 10-bit signed fixed point with 8 fractional bits.
         // Swap the first and third channel (same as PYNQ's PIXEL_RGB), so that the frame buffer
-        // memory layout is R,G,B (red at bit 0). Qt5's linuxfb backend only renders 24bpp
-        // correctly with this layout; other fbdev clients follow the bitfields below.
+        // memory layout is R,G,B (red at bit 0). Note that Qt5's linuxfb backend swaps red and
+        // blue for 24bpp frame buffers regardless of layout; use 32bpp for Qt.
         static const u32 rgb_swap[COLOR_CONVERT_NUM_COEFFS] = {
             0, 0, 0x100,
             0, 0x100, 0,
@@ -758,7 +797,7 @@ static int pynqz1_fb_probe(struct platform_device *pdev)
 
         vdma_tx_write_reg(fbdev, VDMA_REG_CR, cr);
 
-        vdma_write_reg(fbdev, VDMA_REG_MM2S_ADDR+VDMA_REG_HSIZE, fbdev->width*BYTES_PER_PIXEL);
+        vdma_write_reg(fbdev, VDMA_REG_MM2S_ADDR+VDMA_REG_HSIZE, fbdev->width*fbdev->bytes_per_pixel);
         vdma_write_reg(fbdev, VDMA_REG_MM2S_ADDR+VDMA_REG_STRD_FRMDLY, fbdev->stride | (0 << VDMA_FRMDLY_SHIFT));    // FrameDelay = 0;
 
         for(i = 0; i < FB_NUMBER_OF_FRAMES; i++) {
