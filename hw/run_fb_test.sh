@@ -24,6 +24,10 @@ if [ "$(avail_mb)" -lt "$min_start" ]; then
 fi
 
 mkdir -p "$3"
+pynq_dir=$(cd "$1" && pwd)
+out_dir=$(cd "$3" && pwd)
+set -- "$pynq_dir" "$2" "$out_dir" "${4:-0}"
+cd "$out_dir"   # Vivado writes some files (e.g. NA/ps7_summary.html) to the working directory
 set +u   # Xilinx's settings scripts reference unset variables
 source "$settings"
 set -u
