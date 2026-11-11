@@ -1,0 +1,29 @@
+/*
+ * Device tree overlay for a design built with hw/pynq_fb.tcl, variant "lean", using the
+ * default addresses of assign_pynq_fb_addresses. Apply at runtime via configfs after the
+ * bitstream is loaded; see readme.md.
+ *
+ * The lean variant has no color_convert/pixel_unpack blocks: do not list their addresses,
+ * the driver would access unmapped registers and hang the bus.
+ */
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+			pynq-fb@43c10000 {
+				compatible = "fugafuga,pynqz1_fb";
+				reg = <0x43c10000 0x10000	/* axi_dynclk */
+				       0x43c20000 0x10000	/* vtc_out    */
+				       0x43000000 0x10000>;	/* axi_vdma   */
+				debug = <0>;
+				/* Supported: 640x480, 800x480, 800x600, 1280x720, 1280x1024, 1920x1080 */
+				width = <1280>;
+				height = <720>;
+				bpp = <32>;	/* 32bpp stream, padding byte dropped in fabric */
+			};
+		};
+	};
+};

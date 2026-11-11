@@ -151,6 +151,7 @@ struct pynqz1_fb_device {
     u32 stride; // Number of bytes in a horizontal line.
 
     u32 bytes_per_pixel;    // 3 (24bpp, RGB888) or 4 (32bpp, XRGB8888)
+    bool bpp_from_dt;       // "bpp" was given in the device tree
 
     u32 debug;  // Debug level
 
@@ -480,7 +481,7 @@ static int pynqz1_fb_parse_dt(struct platform_device* pdev, struct pynqz1_fb_dev
 
     {
         u32 bpp = DEFAULT_BITS_PER_PIXEL;
-        of_property_read_u32(np, "bpp", &bpp);
+        fbdev->bpp_from_dt = of_property_read_u32(np, "bpp", &bpp) == 0;
         if( bpp != 24 && bpp != 32 ) {
             dev_info(&pdev->dev, "Unsupported bpp %u, using %u.\n", bpp, DEFAULT_BITS_PER_PIXEL);
             bpp = DEFAULT_BITS_PER_PIXEL;
@@ -600,8 +601,10 @@ static int pynqz1_fb_probe(struct platform_device *pdev)
         }
     }
 
-    // 32bpp needs pixel_unpack to drop the padding byte; without it the VDMA streams 24bpp.
-    if( fbdev->reg_unpack == NULL && fbdev->bytes_per_pixel != 3 ) {
+    // Without pixel_unpack, the stream format is fixed by the hardware: the original PYNQ-Z1
+    // overlay streams 24bpp, while hw/pynq_fb.tcl "lean" drops the padding byte of 32bpp pixels
+    // in fabric. Default to 24bpp unless the device tree states "bpp".
+    if( fbdev->reg_unpack == NULL && fbdev->bytes_per_pixel != 3 && !fbdev->bpp_from_dt ) {
         dev_info(&pdev->dev, "No pixel_unpack block, using 24bpp.\n");
         fbdev->bytes_per_pixel = 3;
     }

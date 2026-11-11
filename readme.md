@@ -94,6 +94,40 @@ e.g. with a udev rule (`/etc/udev/rules.d/99-razer-naga-zynq.rules`):
 ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0067", ATTR{bInterfaceNumber}=="02", ATTR{authorized}="0"
 ```
 
+### Using the framebuffer in your own bitstream
+
+[`hw/pynq_fb.tcl`](hw/pynq_fb.tcl) creates the HDMI output path as a block design hierarchy, so the
+framebuffer can be added to a design that also contains other accelerators:
+
+```
+source hw/pynq_fb.tcl
+create_pynq_fb [current_bd_instance .] pynq_fb lean   ;# or: pynq
+# connect S_AXI_LITE (PS M_AXI_GPx), M_AXI_MM2S (PS S_AXI_HPx), clk_100M (exactly 100 MHz),
+# clk_stream (>= 125 MHz for 1080p), resetn_100M, resetn_stream; make TMDS external as "hdmi_out"
+assign_pynq_fb_addresses pynq_fb ps7_0/Data
+```
+
+Add [`hw/pynq_z2_hdmi_out.xdc`](hw/pynq_z2_hdmi_out.xdc) for the PYNQ-Z2 HDMI TX pins, and PYNQ's
+`boards/ip` (Digilent `rgb2dvi`/`axi_dynclk`, `color_swap`) to the IP repository paths.
+
+* `lean` (recommended): VDMA, a byte-dropping `axis_subset_converter`, video timing controller and
+  video output, no HLS IP. Use [`hw/pynq_fb_lean.dtso`](hw/pynq_fb_lean.dtso) (32bpp, no
+  color_convert/pixel_unpack registers).
+* `pynq`: the base overlay's pipeline with PYNQ's `pixel_unpack` and `color_convert` HLS IP (build
+  them from PYNQ's `boards/ip/hls` first). Works with `pynqz2fb.dtso`.
+
+[`hw/run_fb_test.sh`](hw/run_fb_test.sh) builds a framebuffer-only PYNQ-Z2 design (PS settings from
+PYNQ's `base.tcl`) with [`hw/build_fb_test.tcl`](hw/build_fb_test.tcl), with a free-memory check:
+
+```
+hw/run_fb_test.sh <PYNQ checkout> lean <out_dir> 1     # 1 = also write .bit/.hwh
+```
+
+Measured for `lean` with Vivado 2024.2 on the XC7Z020 (post-route, timing met): 2724 LUTs (5.1%),
+5262 FFs (4.9%), 1 RAMB36 + 2 RAMB18, no DSPs, plus 1 MMCM, 1 BUFR, 1 BUFIO, 2 BUFGCTRL and
+8 OSERDESE2. The largest parts are the video timing controller (936 LUTs), the VDMA (753) and the
+AXI-Lite interconnect (510). The frame buffer reads ~220 MB/s at 720p60 and ~500 MB/s at 1080p60.
+
 The instructions below are for the original PYNQ-Z1 image released in 2017.
 
 ## Requirements
